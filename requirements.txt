@@ -1,3 +1,6 @@
 pyyaml
 python-dotenv
 tabulate
+scikit-learn
+joblib
+anthropic
