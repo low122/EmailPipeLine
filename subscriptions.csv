@@ -1,0 +1,9 @@
+service,amount,currency,billing_cycle,next_payment_date,confidence,subject,processed_at
+Atlassian Jira,17.00,USD,Monthly,2024-10-16,0.8,Your subscription will be deactivated soon,2025-07-06 17:09:46
+Atlassian Jira,17.00,USD,Monthly,2024-10-16,0.8,Last chance: your subscription will be deactivated soon,2025-07-06 17:09:46
+Framer,8.91,USD,Monthly,2025-07-05,0.8,"Interac e-Transfer: The request for $155.04 transfer to Wise
+ Payments Ltd. was successfully deposited.",2025-07-06 17:09:46
+Framer,20.00,USD,Monthly,2025-08-02,0.8,Your receipt from Framer B.V. #2400-7483,2025-07-06 17:09:46
+Canva,19.00,CAD,Monthly,2025-08-02,0.9,"Interac e-Transfer: Wise Payments Ltd. has requested $305.22 from
+ you.",2025-07-06 17:09:46
+Spotify Premium,15.90,MYR,Monthly,2025-08-22,0.8,=?utf-8?B?TW9tJ3MgZ2lmdCBpcyB1cCB0byA0MCUgb2Zm?=,2025-07-06 17:09:46

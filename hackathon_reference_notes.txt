@@ -1,0 +1,323 @@
+HACKATHON REFERENCE NOTES - EMAIL SUBSCRIPTION SCANNER
+=====================================================
+
+🚨 QUICK SETUP CHECKLIST
+------------------------
+□ pip install imaplib anthropic python-dotenv tabulate
+□ Create .env file with:
+  IMAP_SERVER=imap.gmail.com
+  EMAIL_USER=your_email@gmail.com
+  EMAIL_PASSWORD=your_app_password
+  CLAUDE_API_KEY=your_claude_key
+□ Enable "Less secure app access" or use App Password for Gmail
+□ Test connection first with simple script
+
+⚡ ESSENTIAL CODE SNIPPETS
+--------------------------
+
+📧 BASIC EMAIL CONNECTION:
+```python
+import imaplib
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+mail = imaplib.IMAP4_SSL(os.getenv('IMAP_SERVER'))
+mail.login(os.getenv('EMAIL_USER'), os.getenv('EMAIL_PASSWORD'))
+mail.select("INBOX")
+```
+
+🔍 EMAIL SEARCH PATTERNS:
+```python
+# Last N emails
+status, messages = mail.search(None, "ALL")
+email_ids = messages[0].split()[-50:]  # Last 50
+
+# Date-based search
+from datetime import datetime, timedelta
+date_str = (datetime.now() - timedelta(days=30)).strftime("%d-%b-%Y")
+status, messages = mail.search(None, f'SINCE "{date_str}"')
+
+# Gmail Important emails
+status, messages = mail.search(None, 'X-GM-LABELS "\\\\Important"')
+
+# Multiple criteria
+status, messages = mail.search(None, 'FROM "netflix" SINCE "01-Jan-2024"')
+```
+
+📨 EMAIL PARSING:
+```python
+import email
+
+# Get email content
+status, msg_data = mail.fetch(email_id, "(RFC822)")
+raw_email = msg_data[0][1]
+msg = email.message_from_bytes(raw_email)
+
+# Extract headers
+sender = msg.get("From", "Unknown")
+subject = msg.get("Subject", "No Subject")
+date = msg.get("Date", "Unknown")
+
+# Extract text content
+def get_text_content(msg):
+    text = ""
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() == "text/plain":
+                text += part.get_payload(decode=True).decode('utf-8', errors='ignore')
+    else:
+        text = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
+    return text
+```
+
+🤖 CLAUDE API INTEGRATION:
+```python
+import anthropic
+import json
+import re
+
+client = anthropic.Anthropic(api_key=os.getenv("CLAUDE_API_KEY"))
+
+def analyze_with_claude(email_data):
+    prompt = f"""
+    Analyze this email for subscription information:
+    From: {email_data['from']}
+    Subject: {email_data['subject']}
+    Content: {email_data['content'][:500]}
+    
+    Return JSON format:
+    {{"service": "ServiceName", "amount": "19.99", "currency": "USD", "billing_cycle": "Monthly", "confidence": 0.9}}
+    """
+    
+    response = client.messages.create(
+        model="claude-3-5-haiku-20241022",
+        max_tokens=1000,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    
+    # Extract JSON from response
+    content = response.content[0].text
+    json_match = re.search(r'\{.*\}', content, re.DOTALL)
+    if json_match:
+        return json.loads(json_match.group(0))
+    return {}
+```
+
+📊 DATA PROCESSING SNIPPETS:
+```python
+# Remove duplicates
+import hashlib
+def remove_duplicates(emails):
+    seen = set()
+    unique_emails = []
+    for email in emails:
+        hash_val = hashlib.sha256(email['raw']).hexdigest()
+        if hash_val not in seen:
+            seen.add(hash_val)
+            unique_emails.append(email)
+    return unique_emails
+
+# Filter by keywords
+def filter_subscription_emails(emails):
+    keywords = ["payment", "subscription", "invoice", "bill", "premium", "pro"]
+    filtered = []
+    for email in emails:
+        if any(keyword in email['subject'].lower() for keyword in keywords):
+            filtered.append(email)
+    return filtered
+
+# Prioritize emails
+def prioritize_emails(emails):
+    priority_senders = ["paypal", "stripe", "netflix", "spotify", "apple"]
+    for email in emails:
+        if any(sender in email['from'].lower() for sender in priority_senders):
+            email['priority'] = 10
+        else:
+            email['priority'] = 1
+    return sorted(emails, key=lambda x: x['priority'], reverse=True)
+```
+
+💾 EXPORT DATA:
+```python
+import csv
+import json
+
+# Export to CSV
+def export_csv(data, filename="results.csv"):
+    with open(filename, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=['service', 'amount', 'currency', 'billing_cycle'])
+        writer.writeheader()
+        writer.writerows(data)
+
+# Export to JSON
+def export_json(data, filename="results.json"):
+    with open(filename, 'w') as f:
+        json.dump(data, f, indent=2)
+```
+
+🐛 COMMON ISSUES & QUICK FIXES
+------------------------------
+
+❌ "Authentication failed"
+✅ Fix: Use App Password instead of regular password
+   - Gmail: Security → 2-Step Verification → App passwords
+   - Use 16-character app password in .env
+
+❌ "IMAP is not enabled"
+✅ Fix: Enable IMAP in Gmail settings
+   - Settings → See all settings → Forwarding and POP/IMAP → Enable IMAP
+
+❌ "Could not resolve authentication method" (Claude)
+✅ Fix: Pass API key correctly
+   client = anthropic.Anthropic(api_key=api_key)
+
+❌ "JSON parsing error"
+✅ Fix: Extract JSON from markdown
+```python
+import re
+json_match = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', content, re.DOTALL)
+if json_match:
+    json_str = json_match.group(1)
+else:
+    json_match = re.search(r'\[.*\]', content, re.DOTALL)
+    json_str = json_match.group(0) if json_match else content
+```
+
+❌ "UnicodeDecodeError"
+✅ Fix: Handle encoding properly
+   text = payload.decode('utf-8', errors='ignore')
+
+❌ "Too many API calls"
+✅ Fix: Batch process emails
+```python
+# Process in batches of 10
+batch_size = 10
+for i in range(0, len(emails), batch_size):
+    batch = emails[i:i+batch_size]
+    results = analyze_batch(batch)
+```
+
+⚡ PERFORMANCE OPTIMIZATION HACKS
+---------------------------------
+
+🔥 Limit email processing:
+```python
+# Process only recent emails
+emails = emails[-100:]  # Last 100 emails
+
+# Set max processing limit
+MAX_EMAILS = 200
+if len(emails) > MAX_EMAILS:
+    emails = emails[-MAX_EMAILS:]
+```
+
+🔥 Cache results:
+```python
+import pickle
+
+# Save processed emails
+def save_cache(data, filename="cache.pkl"):
+    with open(filename, 'wb') as f:
+        pickle.dump(data, f)
+
+# Load cached results
+def load_cache(filename="cache.pkl"):
+    try:
+        with open(filename, 'rb') as f:
+            return pickle.load(f)
+    except:
+        return {}
+```
+
+🔥 Async processing (if needed):
+```python
+import asyncio
+import aiohttp
+
+async def process_email_async(email):
+    # Your async processing logic
+    pass
+
+async def process_all_emails(emails):
+    tasks = [process_email_async(email) for email in emails]
+    return await asyncio.gather(*tasks)
+```
+
+🎯 HACKATHON-SPECIFIC TIPS
+--------------------------
+
+⏰ TIME MANAGEMENT:
+- Start with basic email fetching (30 min)
+- Add AI analysis (60 min)
+- Implement export features (30 min)
+- Add error handling (30 min)
+- Polish UI and demo (30 min)
+
+🎨 DEMO ENHANCEMENTS:
+```python
+# Add progress bars
+from tqdm import tqdm
+for email in tqdm(emails, desc="Processing emails"):
+    # process email
+
+# Add colored output
+from colorama import init, Fore, Style
+init()
+print(f"{Fore.GREEN}✅ Success{Style.RESET_ALL}")
+print(f"{Fore.RED}❌ Error{Style.RESET_ALL}")
+
+# Add table formatting
+from tabulate import tabulate
+print(tabulate(results, headers="keys", tablefmt="fancy_grid"))
+```
+
+🚀 QUICK DEPLOYMENT:
+```python
+# Simple web interface with Flask
+from flask import Flask, render_template, request
+app = Flask(__name__)
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/scan', methods=['POST'])
+def scan_emails():
+    # Your email scanning logic
+    results = scan_subscriptions()
+    return render_template('results.html', results=results)
+
+if __name__ == '__main__':
+    app.run(debug=True)
+```
+
+📋 TESTING CHECKLIST
+--------------------
+□ Test with real email account
+□ Test with different email providers
+□ Test with various subscription email formats
+□ Test error handling (wrong credentials, no internet)
+□ Test with large email volumes
+□ Test export functionality
+□ Test API rate limits
+□ Prepare demo data
+
+🔧 BACKUP PLANS
+---------------
+1. If Claude API fails → Use OpenAI GPT-4
+2. If IMAP fails → Use Gmail API
+3. If email parsing fails → Use simple keyword matching
+4. If real-time processing is slow → Use pre-processed sample data
+
+💡 PRESENTATION TIPS
+-------------------
+- Show before/after: manual vs automated subscription tracking
+- Demonstrate cost savings potential
+- Show export to spreadsheet functionality
+- Highlight accuracy and confidence scoring
+- Demo with live email account (if possible)
+
+===============================================
+REMEMBER: Focus on MVP first, then add features!
+Start simple, make it work, then make it better. 
