@@ -49,7 +49,7 @@ def show_subscriptions():
     cursor = conn.cursor()
     
     try:
-        # Get subscriptions
+        # Get subscriptions with confidence >= 70%
         query = """
         SELECT 
             c.vendor,
@@ -62,7 +62,7 @@ def show_subscriptions():
             m.mailbox_id
         FROM classifications c
         JOIN messages m ON c.message_id = m.id
-        WHERE c.vendor != '' AND c.vendor IS NOT NULL
+        WHERE c.vendor != '' AND c.vendor IS NOT NULL AND c.confidence >= 0.70
         ORDER BY m.received_at DESC;
         """
         
@@ -76,9 +76,6 @@ def show_subscriptions():
             print("\n💡 Check back in a few minutes!")
             print("   Or check pipeline logs: docker compose -f infra/compose.yml logs imap_poller\n")
             return
-        
-        # Calculate total
-        total_monthly = sum(row[1] for row in results if row[1])
         
         # Display results
         print(f"Found {len(results)} subscription(s):\n")
@@ -111,8 +108,6 @@ def show_subscriptions():
                 date_str = date.strftime("%Y-%m-%d") if date else "N/A"
                 mailbox_str = (mailbox[:20] + "...") if mailbox and len(mailbox) > 20 else (mailbox or "N/A")
                 print(f"{vendor or 'N/A':<20} {amount_str:<12} {currency or 'USD':<8} {class_type or 'N/A':<12} {confidence_str:<10} {date_str:<12} {mailbox_str:<25}")
-        
-        print(f"\n💰 Total Monthly Cost: ${total_monthly:.2f}")
         
         # Show pipeline stats
         cursor.execute("SELECT COUNT(*) FROM messages")
