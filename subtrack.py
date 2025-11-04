@@ -352,6 +352,7 @@ def process_emails():
             processed_results.append(result)
     
     print(f"Analysis complete. Found {len(processed_results)} subscriptions.")
+
     return processed_results
 
 def check_configuration():
@@ -391,13 +392,6 @@ def main():
         display_results(results)
 
         if results:
-            with open("subscriptions.csv", 'w', newline='') as f:
-                fieldnames = ['service', 'amount', 'currency', 'billing_cycle', 'next_payment_date', 'confidence', 'subject', 'processed_at']
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(results)
-                print(f"\n✓ Results exported to subscriptions.csv")
-            
             # Calculate total monthly cost
             total_monthly = 0
             for result in results:
