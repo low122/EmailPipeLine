@@ -1,8 +1,6 @@
 # Phase 0: Docker Compose Configuration
 # Orchestrates the event-driven email pipeline
 
-version: '3.8'
-
 # Define the network all services will use
 networks:
   pipeline:
