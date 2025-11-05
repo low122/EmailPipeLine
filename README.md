@@ -213,4 +213,3 @@ docker compose -f infra/compose.yml up -d <service-name>
 
 **Database connection issues:**
 - Ensure PostgreSQL is running: `docker compose -f infra/compose.yml ps postgres`
-- Check database credentials in `.env`
