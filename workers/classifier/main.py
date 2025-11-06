@@ -44,26 +44,35 @@ def classify_email_with_claude(text_content: str, subject: str, from_addr: str) 
         
         client = anthropic.Anthropic(api_key=api_key)
         
-        prompt = f"""Analyze this email for subscription/payment information:
+        prompt = f"""
+You are an email classifier that extracts *only* active, successful subscription or renewal payments.
 
+INPUT:
 From: {from_addr}
 Subject: {subject}
-Content: {text_content[:2000]}
+Body: {text_content[:2000]}
 
-IMPORTANT: Only identify ACTIVE, SUCCESSFUL subscription payments or renewals.
-EXCLUDE: Failed payments, cancelled subscriptions, one-time purchases, trials, alerts.
+RULES:
+1. Identify only **active or successful recurring subscription payments or renewals**.
+2. **Ignore**:
+   - Failed payments or payment declines
+   - Cancelled subscriptions
+   - One-time purchases
+   - Free trials
+   - Marketing emails, promotions, alerts, or receipts with $0 amount
+3. Do not infer information not explicitly present.
 
-Return ONLY a JSON object in this exact format:
+OUTPUT FORMAT:
+Return exactly one JSON object, with no text or explanations.
+
 ```json
-{{"vendor": "ServiceName", "amount_cents": 1999, "currency": "USD", "class": "subscription", "confidence": 0.9}}
-```
-
-If no active subscription found:
-```json
-{{"vendor": "", "amount_cents": 0, "currency": "", "class": "", "confidence": 0.0}}
-```
-
-Return ONLY the JSON, no explanations."""
+{{
+  "vendor": "<service name or empty string>",
+  "amount_cents": <integer amount in cents or 0>,
+  "currency": "<currency code or empty string>",
+  "class": "subscription" or "",
+  "confidence": <float between 0.0 and 1.0>
+}}"""
 
         
         response = client.messages.create(
@@ -137,6 +146,7 @@ def publish_classified(r: redis.Redis, classification: dict, original_fields: di
             'body_hash': original_fields.get('body_hash', ''),
             'subject': original_fields.get('subject', ''),
             'external_id': original_fields.get('external_id', ''),
+            'received_ts': original_fields.get('received_ts', ''),
             'vendor': classification.get('vendor', ''),
             'amount_cents': str(classification.get('amount_cents', 0)),
             'currency': classification.get('currency', ''),
@@ -208,7 +218,7 @@ def main():
                     )
 
                     # Publish if classification found
-                    if classification.get('vendor') or classification.get('confidence', 0) > 0.5:
+                    if classification.get('vendor') or classification.get('confidence', 0) >= 0.7:
                         publish_classified(r, classification, fields)
                     else:
                         log.debug("No classification found, skipping", message_id=message_id)

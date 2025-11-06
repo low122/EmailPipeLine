@@ -75,6 +75,8 @@ def save_message(conn, fields: dict) -> int:
         body_hash = fields.get('body_hash', '')
         received_ts = fields.get('received_ts', '')
 
+        log.info("Receive timestamp", received_ts=received_ts, has_value=bool(received_ts))
+
         received_at = None
         if received_ts:
             try:

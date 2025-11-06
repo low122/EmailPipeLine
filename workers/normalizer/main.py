@@ -138,7 +138,8 @@ def publish_normalized(r: redis.Redis, normalized_data: dict, original_fields: d
             'body_hash': normalized_data.get('body_hash', ''),
             'text_content': normalized_data.get('text_content', '')[:1000],  # Limit size
             'subject': original_fields.get('subject', ''),
-            'external_id': original_fields.get('external_id', '')
+            'external_id': original_fields.get('external_id', ''),
+            'received_ts': original_fields.get('received_ts', '')
         }
         
         # Publish to normalized stream
