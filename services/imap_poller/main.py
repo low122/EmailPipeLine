@@ -12,6 +12,7 @@ import email
 import hashlib
 import base64
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import anthropic
 import psycopg2
 from dotenv import load_dotenv
@@ -136,7 +137,7 @@ def poll_emails(mail, last_uid=0, is_initial_scan=False):
         else:
             uids = []
 
-        MAX_EMAILS = 20
+        MAX_EMAILS = 100
         uids = uids[-MAX_EMAILS:]
         log.info("Limiting to latest emails", limited_count=len(uids))
         
@@ -402,6 +403,119 @@ def update_scan_status(conn, mailbox_id: str, last_uid: int, initial_completed: 
         log.error("Error updating scan status", error=str(e))
         conn.rollback()
 
+def process_email_batch(email_batch: list, r: redis.Redis, mailbox_id: str) -> dict:
+    """
+    Process a batch of emails in parallel
+    
+    Args:
+        email_batch: List of email dicts
+        r: Redis connection
+        mailbox_id: Email address
+    
+    Returns:
+        Dict with published_count and max_uid
+    """
+    published_count = 0
+    max_uid = 0
+
+    def process_single_email(email_data):
+        """Process a single email and return result"""
+        try:
+            # Check if email should be published (AI classification happens inside)
+            # We need to check classification first to decide if we publish
+            subject = email_data.get('subject', '')
+            from_addr = email_data.get('from_addr', '')
+            
+            subject_classification = classify_subject_with_ai(subject, from_addr)
+            confidence = subject_classification.get('confidence', 0.0)
+            is_subscription = subject_classification.get('is_subscription', False)
+
+            log.info(f"Checking {subject}:", confidence=confidence, is_subscription=is_subscription)
+            
+            if confidence >= 0.7 and is_subscription:
+                # Publish the email
+                publish_email_internal(r, email_data, mailbox_id)
+                return {'published': True, 'uid': email_data.get('uid', 0)}
+            else:
+                return {'published': False, 'uid': email_data.get('uid', 0)}
+        except Exception as e:
+            log.error("Error processing email in batch", error=str(e), uid=email_data.get('uid'))
+            return {'published': False, 'uid': email_data.get('uid', 0)}
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(process_single_email, email_data): email_data 
+                  for email_data in email_batch}
+
+        for future in as_completed(futures):
+            try:
+                log.info("Processed email [process_single_email]")
+
+                result = future.result()
+                if result['published']:
+                    published_count += 1
+                if result['uid'] > max_uid:
+                    max_uid = result['uid']
+
+            except Exception as e:
+                log.error("Email failed [process_single_email]")
+                
+    
+    return {'published_count': published_count, 'max_uid': max_uid}
+
+def publish_email_internal(r: redis.Redis, email_data: dict, mailbox_id: str):
+    """
+    Internal publish function (without AI check, assumes already checked)
+    This is the publishing logic extracted from publish_email
+    """
+    try:
+        # Extract external_id
+        external_id = email_data.get('message_id') or str(email_data.get('uid'))
+        
+        # Determine provider
+        if '@gmail.com' in mailbox_id:
+            provider = 'gmail'
+        elif '@outlook.com' in mailbox_id or '@hotmail.com' in mailbox_id:
+            provider = 'outlook'
+        else:
+            provider = mailbox_id.split('@')[1].split('.')[0] if '@' in mailbox_id else 'unknown'
+        
+        # Build idempotency key
+        idemp_key = build_idempotency_key(provider, mailbox_id, external_id)
+        
+        # Generate trace_id
+        trace_id = str(int(time.time() * 1000))
+        
+        # Wrap the timeframe
+        received_ts = str(int(time.time()))
+        email_date_str = email_data.get('date', '')
+        if email_date_str:
+            try:
+                from email.utils import parsedate_to_datetime
+                email_date = parsedate_to_datetime(email_date_str)
+                if email_date:
+                    received_ts = str(int(email_date.timestamp()))
+            except (ValueError, TypeError, AttributeError) as e:
+                log.warning("Failed to parse email date, using current time")
+        
+        # Encode raw email bytes as base64 for Redis
+        raw_email_b64 = base64.b64encode(email_data.get('raw', b'')).decode('utf-8')
+        
+        # Publish to Redis Stream
+        message_id = r.xadd('raw_emails.v1', {
+            'trace_id': trace_id,
+            'mailbox_id': mailbox_id,
+            'received_ts': received_ts,
+            'idemp_key': idemp_key,
+            'subject': email_data.get('subject', ''),
+            'external_id': external_id,
+            'raw_email_b64': raw_email_b64
+        })
+        
+        log.info("Published email", message_id=message_id, idemp_key=idemp_key, subject=email_data.get('subject'))
+        
+    except Exception as e:
+        log.error("Error publishing email", error=str(e))
+
 
 def main():
     """
@@ -448,7 +562,7 @@ def main():
     else:
         log.info("Starting incremental scan", mailbox_id=mailbox_id, last_uid=last_uid)
 
-    MAX_STREAMS = 3
+    NUM_STREAMS = 3
     TEST_BATCH_SIZE = 100
     
     while True:
@@ -459,23 +573,54 @@ def main():
             if emails:
                 log.info("Found emails", count=len(emails), is_initial=is_initial_scan)
                 
-                # Publish each email (subject filtering happens inside)
+                # For testing: limit to TEST_BATCH_SIZE if initial scan
+                if is_initial_scan and len(emails) > TEST_BATCH_SIZE:
+                    emails = emails[:TEST_BATCH_SIZE]
+                    log.info("Limiting to test batch", batch_size=TEST_BATCH_SIZE)
+                
+                # Process emails in parallel batches
                 published_count = 0
-                for email_data in emails:
-                    publish_email(r, email_data, mailbox_id)
-                    published_count += 1
+                max_uid = last_uid
+                
+                # Process emails in chunks of NUM_STREAMS
+                for i in range(0, len(emails), NUM_STREAMS):
+                    batch = emails[i:i + NUM_STREAMS]
                     
+                    # Process this batch in parallel
+                    with ThreadPoolExecutor(max_workers=10) as executor:
+                        futures = {
+                            executor.submit(publish_email, r, email_data, mailbox_id): email_data 
+                            for email_data in batch
+                        }
+                        
+                        for future in as_completed(futures):
+                            email_data = futures[future]
+                            try:
+                                future.result()  # Wait for completion
+                                published_count += 1
+                                if email_data['uid'] > max_uid:
+                                    max_uid = email_data['uid']
+                            except Exception as e:
+                                log.error("Error processing email", 
+                                        error=str(e), 
+                                        uid=email_data.get('uid'))
+                    
+                    # Log progress every batch
+                    if (i + NUM_STREAMS) % 30 == 0 or i + NUM_STREAMS >= len(emails):
+                        log.info("Processing progress", 
+                                processed=min(i + NUM_STREAMS, len(emails)),
+                                total=len(emails),
+                                published=published_count)
+                
                 # Update last_uid
                 if emails:
-                    max_uid = max(email_data['uid'] for email_data in emails)
                     last_uid = max_uid
                     
                     # Update scan status in database
                     if pg_conn:
-                        # Mark initial scan as completed if this was the initial scan
                         if is_initial_scan:
                             update_scan_status(pg_conn, mailbox_id, last_uid, initial_completed=True)
-                            is_initial_scan = False  # Switch to incremental mode
+                            is_initial_scan = False
                             log.info("Initial scan completed", mailbox_id=mailbox_id, last_uid=last_uid)
                         else:
                             update_scan_status(pg_conn, mailbox_id, last_uid)
@@ -483,13 +628,11 @@ def main():
                     log.info("Published emails", 
                             count=published_count, 
                             total_found=len(emails),
-                            last_uid=last_uid)
-                else:
-                    log.warning("No email Found")
+                            last_uid=last_uid,
+                            streams=NUM_STREAMS)
             
             # After initial scan, switch to incremental mode
             if is_initial_scan and not emails:
-                # No more emails found in initial scan
                 if pg_conn:
                     update_scan_status(pg_conn, mailbox_id, last_uid, initial_completed=True)
                 is_initial_scan = False
