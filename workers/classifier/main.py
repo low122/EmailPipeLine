@@ -72,7 +72,7 @@ Return exactly one JSON object, with no text or explanations.
   "currency": "<currency code or empty string>",
   "class": "subscription" or "",
   "confidence": <float between 0.0 and 1.0>
-}}"""
+}}```"""
 
         
         response = client.messages.create(

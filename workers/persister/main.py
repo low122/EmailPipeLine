@@ -164,6 +164,66 @@ ON CONFLICT (message_id) DO UPDATE SET
         conn.rollback()
         return False
 
+def save_subscription_history(conn, message_id: int, fields: dict) -> bool:
+    """
+    Save subscription to history table for price tracking
+    
+    Args:
+        conn: PostgreSQL connection
+        message_id: ID from messages table
+        fields: Redis message fields (vendor, amount_cents, currency, mailbox_id, received_ts)
+    
+    Returns:
+        True if successful, False otherwise
+    """
+
+    try:
+        vendor = fields.get('vendor', '')
+        amount_cents_str = fields.get('amount_cents', '0')
+        currency = fields.get('currency', '')
+        mailbox_id = fields.get('mailbox_id', '')
+        received_ts = fields.get('received_ts', '')
+
+        # Only save if vendor exists and amount > 0
+        if not vendor or not amount_cents_str:
+            return False
+            
+        amount_cents = int(amount_cents_str) if amount_cents_str else 0
+        if amount_cents <= 0:
+            return False
+        
+        # Parse received timestamp
+        received_at = None
+        if received_ts:
+            try:
+                received_at = datetime.fromtimestamp(int(received_ts))
+            except (ValueError, TypeError):
+                received_at = None
+        
+        if not received_at:
+            return False
+
+        sql = """
+        INSERT INTO subscription_history (vendor, amount_cents, currency, received_at, message_id, mailbox_id)
+        VALUES (%s, %s, %s, %s, %s, %s);
+        """
+
+        cursor = conn.cursor()
+        cursor.execute(sql, (vendor, amount_cents, currency, received_at, message_id, mailbox_id))
+        cursor.close()
+
+        conn.commit()
+        
+        log.info("Saved subscription history", 
+                vendor=vendor,
+                amount_cents=amount_cents,
+                received_at=received_at)
+        return True
+    except Exception as e:
+        log.error("Error saving subscription history", error=str(e))
+        conn.rollback()
+        return False
+
 
 def main():
     """
@@ -219,6 +279,10 @@ def main():
                 if db_message_id:
                     # Save classification (linked to message)
                     save_classification(conn, db_message_id, fields)
+
+                    # Save to smart notification
+                    save_subscription_history(conn, db_message_id, fields)
+                    
                     log.info("Persisted email", 
                             db_message_id=db_message_id,
                             vendor=fields.get('vendor'))
