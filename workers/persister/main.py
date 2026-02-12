@@ -25,7 +25,7 @@ log = structlog.get_logger(service="persister")
 
 
 def get_supabase():
-    """Create Supabase client. Uses same API as add_watcher (no direct Postgres)."""
+    """Create Supabase client. Uses same API as create_watcher_bundle (no direct Postgres)."""
     url = os.environ.get("SUPABASE_URL")
     key = os.environ.get("SUPABASE_API_KEY")
     if not url or not key:

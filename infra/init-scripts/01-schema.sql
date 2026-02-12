@@ -30,17 +30,17 @@ CREATE INDEX IF NOT EXISTS idx_messages_mailbox_id ON messages(mailbox_id);
 
 -- ============================================
 -- Table: classifications
--- Purpose: Store AI analysis results (subscription info)
+-- Purpose: Store AI analysis results. MUST: message_id, class, confidence.
+-- All other extracted fields go in extracted_data (JSONB).
 -- ============================================
 
 CREATE TABLE IF NOT EXISTS classifications (
     id SERIAL PRIMARY KEY,
     message_id INTEGER UNIQUE NOT NULL,
-    class TEXT,                         -- "subscription", "receipt", etc.
-    vendor TEXT,                        -- "Netflix", "Spotify", etc.
-    amount_cents INTEGER,               -- Store as cents (1999 = $19.99)
-    currency TEXT,                      -- "USD", "EUR", etc.
-    confidence FLOAT,                   -- 0.0 to 1.0 (AI confidence score)
+    class TEXT,                         -- watcher name / category
+    confidence FLOAT,                    -- 0.0 to 1.0
+    watcher_id UUID,                     -- links to watchers.id
+    extracted_data JSONB DEFAULT '{}',   -- flexible: vendor, amount_cents, flight_number, etc.
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
 );
@@ -48,5 +48,6 @@ CREATE TABLE IF NOT EXISTS classifications (
 -- Indexes for classifications table
 -- ============================================
 
--- Create index on message_id for fast joins
 CREATE INDEX IF NOT EXISTS idx_classifications_message_id ON classifications(message_id);
+CREATE INDEX IF NOT EXISTS idx_classifications_watcher_id ON classifications(watcher_id);
+CREATE INDEX IF NOT EXISTS idx_classifications_extracted_data ON classifications USING GIN (extracted_data);

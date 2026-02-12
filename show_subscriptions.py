@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Show Watcher Results - Displays emails matched by user-defined watchers
-Uses Supabase API (same as persister, add_watcher) - no direct Postgres needed.
+Uses Supabase API (same as persister, create_watcher_bundle) - no direct Postgres needed.
 """
 
 import os
@@ -112,7 +112,7 @@ def show_subscriptions():
             print("📭 No watcher matches yet.")
             print("\nThe pipeline is processing your emails...")
             print("Add watchers with: python scripts/create_watcher_bundle.py")
-            print("Or: python scripts/add_watcher.py")
+            print("Or: python scripts/create_watcher_bundle.py")
             print("\n💡 Check back after adding watchers and processing emails.\n")
             return
         

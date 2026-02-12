@@ -1,14 +1,16 @@
 # EmailPipeLine
 
-An event-driven email processing pipeline that scans inboxes, normalizes emails, classifies subscriptions using AI, and persists data. Uses Redis Streams and runs **without Docker** — install Redis and run the Python services locally.
+An event-driven email processing pipeline that scans inboxes, normalizes emails, matches them to user-defined watchers, and extracts data via AI. Uses Redis Streams and runs **without Docker** — install Redis and run the Python services locally.
 
 ## Architecture
 
 - **Phase 3**: IMAP Poller — scans inbox, publishes to `raw_emails.v1`
 - **Phase 4**: Normalizer — parses MIME, cleans text, publishes to `emails.normalized.v1`
-- **Phase 5**: Classifier — Claude AI extracts subscription details, publishes to `emails.classified.v1`
-- **Phase 6**: Persister — saves to database (Supabase Postgres)
-- **Watcher** — semantic filter: matches emails to user-defined watchers (Supabase + Voyage embeddings)
+- **Watcher** — semantic filter: matches emails to user-defined watchers (Supabase + Voyage embeddings), publishes to `emails.to_classify.v1`
+- **Phase 5**: Classifier — Claude AI extracts watcher-specific data (billing, flights, rentals, etc.), publishes to `emails.classified.v1`
+- **Phase 6**: Persister — saves to Supabase (messages + classifications)
+
+Classifications are flexible: `class` (watcher name), `confidence`, and `extracted_data` (JSONB) hold all extracted fields per watcher type.
 
 Services communicate via **Redis Streams** with consumer groups.
 
@@ -37,12 +39,17 @@ Install per-worker deps if you use them (e.g. watcher: `pip install supabase voy
 
 ```bash
 cp .env.example .env
-# Edit .env: IMAP_*, REDIS_HOST=localhost, DB_* (Supabase), SUPABASE_*, CLAUDE_API_KEY, VOYAGE_API_KEY if using watcher
+# Edit .env: IMAP_*, REDIS_HOST=localhost, SUPABASE_URL, SUPABASE_API_KEY, CLAUDE_API_KEY, VOYAGE_API_KEY (if using watcher)
 ```
 
 ### 3. Database (Supabase)
 
-Run the schema in your Supabase project (SQL Editor): use `infra/init.sql` or `infra/init-scripts/01-schema.sql` to create `messages` and `classifications`. Create `watchers` and `email_embeddings` (and `match_watchers` RPC) if you use the watcher.
+In Supabase SQL Editor:
+
+- **New project**: Run `infra/init-scripts/01-schema.sql` to create `messages` and `classifications`.
+- **Existing project** (with old schema): Run `infra/init-scripts/02-classifications-flexible.sql` to migrate.
+
+For the watcher: create `watchers`, `watcher_queries`, `email_embeddings`, and the `match_watcher_queries` RPC. Use `scripts/create_watcher_bundle.py`.
 
 ### 4. Start Redis and services
 
@@ -71,43 +78,48 @@ python workers/watcher/watcher_semantic.py
 python show_subscriptions.py
 ```
 
-Add a watcher (preset or custom):
+Shows watcher matches with extracted data (vendor, amount, flight_number, etc. from `extracted_data`).
+
+### 6. Add watchers
 
 ```bash
-python scripts/add_watcher.py
+python scripts/create_watcher_bundle.py
 ```
+
+Generates AI-powered semantic prototypes from your description and creates the watcher bundle.
 
 ## Project structure
 
 ```
 .
 ├── infra/
-│   ├── init.sql              # Schema for messages/classifications (run in Supabase)
+│   ├── init.sql
 │   ├── init-scripts/
+│   │   ├── 01-schema.sql           # Base schema (messages, classifications)
+│   │   └── 02-classifications-flexible.sql   # Migration: extracted_data, drop vendor/amount/currency
 │   └── test_idempotency.sql
 ├── services/
 │   └── imap_poller/
 ├── workers/
 │   ├── normalizer/
-│   ├── classifier/
+│   ├── classifier/                 # Watcher-driven: extracts into extracted_data
 │   ├── persister/
-│   ├── watcher/              # Semantic watcher (Supabase + Voyage)
+│   ├── watcher/                    # Semantic watcher (Supabase + Voyage)
 │   └── dlq_replayer/
 ├── scripts/
-│   ├── add_watcher.py        # CLI to add watchers
+│   ├── create_watcher_bundle.py    # AI-powered watcher creation
 │   └── run_local.sh          # Start all services
-├── show_subscriptions.py
+├── show_subscriptions.py     # View watcher results (uses Supabase API)
 └── .env.example
 ```
 
 ## Configuration
 
 - **Redis**: `REDIS_HOST=localhost`, `REDIS_PORT=6379` when running locally.
-- **Database**: Use Supabase Postgres; set `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` from Supabase (Project Settings → Database).
-- **Supabase API**: `SUPABASE_URL`, `SUPABASE_API_KEY` for watcher and `scripts/add_watcher.py`.
+- **Supabase**: `SUPABASE_URL`, `SUPABASE_API_KEY` — used by persister, watcher, show_subscriptions, and scripts.
 
 ## Troubleshooting
 
 - **Redis**: Ensure Redis is running (`redis-cli ping`).
 - **IMAP**: Use an App Password with 2FA enabled for Gmail.
-- **No data**: Check each worker’s logs; ensure `.env` has correct keys and Supabase schema is applied.
+- **No data**: Check each worker’s logs; ensure `.env` has correct keys and Supabase schema is applied. Run migration `02-classifications-flexible.sql` if you have the old schema.

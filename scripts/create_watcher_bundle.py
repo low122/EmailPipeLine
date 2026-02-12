@@ -1,14 +1,36 @@
-import os, json
+import os, json, sys
 from dotenv import load_dotenv
 from supabase import create_client
 import voyageai
-import sys
-
-from add_watcher import get_mailbox_id, get_threshold
+from anthropic import Anthropic
 
 load_dotenv()
 
-from anthropic import Anthropic
+DEFAULT_THRESHOLD = 0.7
+
+
+def get_mailbox_id() -> str:
+    """Mailbox ID from env or prompt."""
+    mailbox_id = os.getenv("MAILBOX_ID", "").strip()
+    if mailbox_id:
+        return mailbox_id
+    return input("Enter mailbox_id (e.g. your@email.com): ").strip()
+
+
+def get_threshold() -> float:
+    """Threshold for cosine-similarity match (0–1)."""
+    raw = input(f"Similarity threshold [0–1, default {DEFAULT_THRESHOLD}]: ").strip()
+    if not raw:
+        return DEFAULT_THRESHOLD
+    try:
+        t = float(raw)
+        if 0 <= t <= 1:
+            return t
+    except ValueError:
+        pass
+    print(f"Using default threshold {DEFAULT_THRESHOLD}.")
+    return DEFAULT_THRESHOLD
+
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
@@ -108,7 +130,6 @@ def create_watcher_bundle(mailbox_id: str, watcher_name: str, threshold: float, 
 if __name__ == "__main__":
     print("AI-powered Watcher Bundle Creator\n")
     
-    # Use interactive functions from add_watcher
     mailbox_id = get_mailbox_id()
     if not mailbox_id:
         print("mailbox_id is required.")
