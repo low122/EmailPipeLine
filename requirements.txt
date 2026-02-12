@@ -1,7 +1,17 @@
-pyyaml
-python-dotenv==1.1.1
-tabulate==0.9.0
-scikit-learn
-joblib
-anthropic==0.56.0
-psycopg2-binary==2.9.9
+# Core
+python-dotenv>=1.0.0
+structlog>=23.2.0
+redis>=5.0.0
+
+# Database (persister, show_subscriptions)
+psycopg2-binary>=2.9.9
+
+# AI & embeddings
+anthropic>=0.56.0
+voyageai>=0.2.0
+
+# Supabase (watcher, scripts/add_watcher.py)
+supabase>=2.0.0
+
+# CLI output (show_subscriptions)
+tabulate>=0.9.0

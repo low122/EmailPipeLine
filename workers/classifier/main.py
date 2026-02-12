@@ -1,6 +1,6 @@
 """
 Classifier Worker - Phase 5
-Consumes from emails.normalized.v1, classifies with Claude API, publishes classified emails
+Consumes from emails.to_classify.v1 (watcher output), classifies with Claude API, publishes to emails.classified.v1
 """
 
 import structlog
@@ -23,18 +23,26 @@ structlog.configure(
 
 log = structlog.get_logger(service="classifier")
 
-def classify_email_with_claude(text_content: str, subject: str, from_addr: str) -> dict:
+def classify_email_with_claude(
+    text_content: str,
+    subject: str,
+    from_addr: str,
+    watcher_name: str | None = None,
+    query_text: str | None = None,
+) -> dict:
     """
-    Classify email using Claude API
-    
+    Classify email using Claude API, driven by user's watcher intent.
+
     Args:
         text_content: Cleaned email text content
         subject: Email subject
         from_addr: Email sender
-    
+        watcher_name: User-defined watcher name (e.g. "Billing", "Flight Confirmations")
+        query_text: User's semantic query describing what to match
+
     Returns:
         Dict with: vendor, amount_cents, currency, class, confidence
-        Returns empty dict if classification fails
+        class is set to watcher_name when provided
     """
     try:
         api_key = os.getenv('CLAUDE_API_KEY')
@@ -43,35 +51,59 @@ def classify_email_with_claude(text_content: str, subject: str, from_addr: str) 
             return {}
         
         client = anthropic.Anthropic(api_key=api_key)
-        
-        prompt = f"""
-You are an email classifier that extracts *only* active, successful subscription or renewal payments.
 
-INPUT:
+        # Use watcher-driven prompt when user intent is known
+        if watcher_name and query_text:
+            prompt = f"""
+You classify emails based on user-defined intent (watchers).
+
+USER INTENT:
+- Watcher name: {watcher_name}
+- User query: {query_text}
+
+EMAIL INPUT:
 From: {from_addr}
 Subject: {subject}
 Body: {text_content[:2000]}
 
-RULES:
-1. Identify only **active or successful recurring subscription payments or renewals**.
-2. **Ignore**:
-   - Failed payments or payment declines
-   - Cancelled subscriptions
-   - One-time purchases
-   - Free trials
-   - Marketing emails, promotions, alerts, or receipts with $0 amount
-3. Do not infer information not explicitly present.
+TASK:
+1. Determine if this email matches the user's intent (confidence 0.0–1.0).
+2. Put ALL extracted info into extracted_data. Only include fields that are present.
+   Examples by watcher type:
+   - Billing: {{"vendor": "Netflix", "amount_cents": 1999, "currency": "USD", "invoice_id": "..."}}
+   - Flights: {{"airline": "United", "flight_number": "UA123", "departure": "2025-02-15", "confirmation": "..."}}
+   - Rentals: {{"company": "Hertz", "pickup_date": "2025-02-20"}}
+   - Use empty {{}} if nothing to extract
+3. Set class to exactly: "{watcher_name}"
+4. Do not infer information not explicitly present.
 
 OUTPUT FORMAT:
 Return exactly one JSON object, with no text or explanations.
 
 ```json
 {{
-  "vendor": "<service name or empty string>",
-  "amount_cents": <integer amount in cents or 0>,
-  "currency": "<currency code or empty string>",
-  "class": "subscription" or "",
-  "confidence": <float between 0.0 and 1.0>
+  "class": "{watcher_name}",
+  "confidence": <float between 0.0 and 1.0>,
+  "extracted_data": {{ <all relevant key-value pairs for this watcher type> }}
+}}"""
+        else:
+            # Fallback: no watcher context (e.g. legacy path)
+            prompt = f"""
+You classify emails. Extract relevant info into extracted_data.
+
+INPUT:
+From: {from_addr}
+Subject: {subject}
+Body: {text_content[:2000]}
+
+OUTPUT FORMAT:
+Return exactly one JSON object, with no text or explanations.
+
+```json
+{{
+  "class": "<category or empty string>",
+  "confidence": <float between 0.0 and 1.0>,
+  "extracted_data": {{}}
 }}"""
 
         
@@ -89,35 +121,30 @@ Return exactly one JSON object, with no text or explanations.
             log.warning("Empty response from Claude")
             return {}
 
-        # Parse JSON from response
-        # Try to find JSON in ```json``` code blocks first
-        json_match = re.search(r'```json\s*(\{[^`]*?\})\s*```', content_text, re.DOTALL)
-
-        # If not found, try standalone JSON
-        if not json_match:
-            json_match = re.search(r'\{[^{}]*"vendor"[^{}]*\}', content_text, re.DOTALL)
-
+        # Parse JSON from response (may contain nested extracted_data)
+        json_match = re.search(r'```json\s*([\s\S]*?)\s*```', content_text)
         if json_match:
-            # Extract JSON string
-            json_str = json_match.group(1) if json_match.lastindex else json_match.group(0)
-            result = json.loads(json_str.strip())
+            json_str = json_match.group(1).strip()
+        else:
+            json_match = re.search(r'\{[\s\S]*\}', content_text)
+            json_str = json_match.group(0) if json_match else ""
+        if json_str:
+            result = json.loads(json_str)
         else:
             log.warning("No JSON found in Claude response")
             return {}
         
-        # Return normalized dict
+        # Return normalized dict (MUST: class, confidence; all else in extracted_data)
+        extracted = result.get('extracted_data')
+        if not isinstance(extracted, dict):
+            extracted = {}
         classification = {
-            'vendor': result.get('vendor', ''),
-            'amount_cents': int(result.get('amount_cents', 0)) if result.get('amount_cents') else 0,
-            'currency': result.get('currency', ''),
             'class': result.get('class', ''),
-            'confidence': float(result.get('confidence', 0.0))
+            'confidence': float(result.get('confidence', 0.0)),
+            'extracted_data': extracted,
         }
         
-        log.info("Classified email", 
-                vendor=classification['vendor'],
-                amount_cents=classification['amount_cents'],
-                confidence=classification['confidence'])
+        log.info("Classified email", class_=classification['class'], confidence=classification['confidence'])
         
         return classification
         
@@ -131,14 +158,15 @@ Return exactly one JSON object, with no text or explanations.
 
 def publish_classified(r: redis.Redis, classification: dict, original_fields: dict):
     """
-    Publish classified email
-    
+    Publish classified email.
+
     Args:
         r: Redis connection
-        classification: Dict with vendor, amount_cents, currency, class, confidence
-        original_fields: Original Redis message fields from normalized stream
+        classification: Dict with vendor, amount_cents, currency, class, confidence, extracted_data
+        original_fields: Original Redis message fields (includes filter_watcher_id)
     """
     try:
+        extracted = classification.get('extracted_data') or {}
         message_data = {
             'trace_id': original_fields.get('trace_id', ''),
             'mailbox_id': original_fields.get('mailbox_id', ''),
@@ -147,20 +175,15 @@ def publish_classified(r: redis.Redis, classification: dict, original_fields: di
             'subject': original_fields.get('subject', ''),
             'external_id': original_fields.get('external_id', ''),
             'received_ts': original_fields.get('received_ts', ''),
-            'vendor': classification.get('vendor', ''),
-            'amount_cents': str(classification.get('amount_cents', 0)),
-            'currency': classification.get('currency', ''),
             'class': classification.get('class', ''),
-            'confidence': str(classification.get('confidence', 0.0))
+            'confidence': str(classification.get('confidence', 0.0)),
+            'watcher_id': original_fields.get('filter_watcher_id', ''),
+            'extracted_data': json.dumps(extracted) if extracted else '{}',
         }
         
         message_id = r.xadd('emails.classified.v1', message_data)
         
-        log.info("Published classified email",
-            stream_message_id=message_id,
-            vendor=classification.get('vendor'),
-            amount_cents=classification.get('amount_cents')
-        )
+        log.info("Published classified email", stream_message_id=message_id, class_=classification.get('class'))
         
     except Exception as e:
         log.error("Error publishing classified email", error=str(e))
@@ -175,14 +198,14 @@ def main():
     log.info("classifier starting...")
 
     r = redis.Redis(
-        host=os.getenv('REDIS_HOST', 'redis'),
+        host=os.getenv('REDIS_HOST', 'localhost'),
         port=int(os.getenv('REDIS_PORT', 6379)),
         decode_responses=True
     )
 
-    # Create consumer group for emails.normalized.v1 (classifier consumes from this)
+    # Create consumer group for emails.to_classify.v1 (watcher publishes here)
     try:
-        r.xgroup_create('emails.normalized.v1', 'classifier-g', id='0', mkstream=True)
+        r.xgroup_create('emails.to_classify.v1', 'classifier-g', id='0', mkstream=True)
         log.info("Created consumer group classifier-g")
     except redis.exceptions.ResponseError as e:
         if "BUSYGROUP" not in str(e):
@@ -197,7 +220,7 @@ def main():
             messages = r.xreadgroup(
                 'classifier-g',
                 consumer_name,
-                {'emails.normalized.v1': '>'},
+                {'emails.to_classify.v1': '>'},
                 count=1,
                 block=1000
             )
@@ -211,22 +234,32 @@ def main():
                 text_content = fields.get('text_content', '')
 
                 if text_content:
+                    watcher_name = fields.get('filter_watcher_name')
+                    query_text = fields.get('filter_query_text')
+
                     classification = classify_email_with_claude(
                         text_content=text_content,
                         subject=fields.get('subject', ''),
-                        from_addr=fields.get('mailbox_id', '')
+                        from_addr=fields.get('mailbox_id', ''),
+                        watcher_name=watcher_name or None,
+                        query_text=query_text or None,
                     )
 
-                    # Publish if classification found
-                    if classification.get('vendor') or classification.get('confidence', 0) >= 0.7:
+                    # Publish when: watcher-matched (we trust the semantic filter) or confidence >= 0.7
+                    has_watcher = bool(watcher_name)
+                    confident = classification.get('confidence', 0) >= 0.7
+                    if has_watcher or confident or classification.get('extracted_data'):
+                        # Ensure class is set from watcher when present
+                        if has_watcher and not classification.get('class'):
+                            classification = {**classification, 'class': watcher_name}
                         publish_classified(r, classification, fields)
                     else:
                         log.debug("No classification found, skipping", message_id=message_id)
                 else:
                     log.warning("No text content to classify", message_id=message_id)
 
-                # ACK the message
-                r.xack('emails.normalized.v1', 'classifier-g', message_id)
+                # ACK the message (we read from emails.to_classify.v1)
+                r.xack('emails.to_classify.v1', 'classifier-g', message_id)
                 log.info("Acknowledged message", message_id=message_id)
 
             time.sleep(1)

@@ -11,7 +11,6 @@ import imaplib
 import email
 import hashlib
 import base64
-from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -85,14 +84,16 @@ def poll_emails(mail, last_uid=0):
         status, response = mail.uid('SEARCH', None, 'ALL')
         # Response: ['100 101 102 103'] (list with one string of space-separated UIDs)
         
-        # parse UID list
+        # parse UID list; only process UIDs > last_uid (new emails)
         if status == 'OK' and response and response[0]:
             uid_string = response[0].decode('utf-8')
             all_uids = [int(uid) for uid in uid_string.split() if uid]
-            # Sort and get the latest 100 (highest UIDs = newest emails)
             sorted_uids = sorted(all_uids)
-            uids = sorted_uids[-100:] if len(sorted_uids) > 100 else sorted_uids
-            log.info("Found emails", total=len(all_uids), processing=len(uids))
+            # Only fetch new emails (UID > last_uid) so we don't re-publish the same ones
+            new_uids = [u for u in sorted_uids if u > last_uid]
+            # Cap at 20 (latest 20 new emails per poll)
+            uids = new_uids[-20:] if len(new_uids) > 20 else new_uids
+            log.info("Found emails", total=len(all_uids), new_since_last=len(new_uids), processing=len(uids))
         else:
             uids = []
         
@@ -183,7 +184,7 @@ def main():
     log.info("imap_poller starting...")
 
     r = redis.Redis(
-        host=os.getenv('REDIS_HOST', 'redis'),
+        host=os.getenv('REDIS_HOST', 'localhost'),
         port=int(os.getenv('REDIS_PORT', 6379)),
         decode_responses=True
     )
@@ -202,34 +203,16 @@ def main():
     
     log.info("imap_poller ready", mailbox_id=mailbox_id)
 
+    # One shot: fetch latest 20 emails, publish to pipeline, then exit. Pipeline processes only these 20.
     last_uid = 0
-    
-    while True:
-        try:
-            # Poll for new emails
-            emails = poll_emails(mail, last_uid)
-            
-            if emails:
-                log.info("Found new emails", count=len(emails))
-                
-                # Publish each email
-                for email_data in emails:
-                    publish_email(r, email_data, mailbox_id)
-                    
-                # Update last_uid to the maximum UID processed
-                # This ensures we don't reprocess the same emails next time
-                if emails:
-                    max_uid = max(email_data['uid'] for email_data in emails)
-                    last_uid = max_uid
-                    log.info("Published emails", count=len(emails), last_uid=last_uid)
-                    
-                    log.info("Published emails", count=len(emails), last_uid=last_uid)
-            
-            time.sleep(30)  # Rate limiting: poll every 30 seconds
-            
-        except Exception as e:
-            log.error("Error in polling loop", error=str(e))
-            time.sleep(60)  # Wait longer on error
+    emails = poll_emails(mail, last_uid)
+    if emails:
+        log.info("Publishing 20 emails to pipeline, then exiting", count=len(emails))
+        for email_data in emails:
+            publish_email(r, email_data, mailbox_id)
+        log.info("Done. Published 20 emails. Exiting.")
+    else:
+        log.info("No emails to publish. Exiting.")
 
 
 if __name__ == "__main__":
