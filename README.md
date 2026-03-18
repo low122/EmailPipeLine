@@ -36,6 +36,12 @@ cp .env.example .env
 # fill IMAP_*, Redis, Supabase, Claude, (Voyage) keys
 ```
 
+Create watchers (one-time setup). The watcher worker runs in `run_local.sh` but needs watcher definitions in Supabase to match against:
+
+```bash
+python scripts/create_watcher_bundle.py
+```
+
 Start Redis and all services:
 
 ```bash
@@ -51,14 +57,9 @@ See the results:
 python show_subscriptions.py
 ```
 
-Create a watcher (semantic filter):
-
-```bash
-python scripts/create_watcher_bundle.py
-```
-
 ## High-level architecture
 
+```mermaid
 flowchart LR
     Inbox["Email Inbox (IMAP)"]
 
@@ -83,3 +84,4 @@ flowchart LR
 
     %% Watcher uses Supabase data + writes embeddings
     P3 <---> DB2
+```
