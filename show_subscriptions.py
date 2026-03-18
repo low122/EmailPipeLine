@@ -1,37 +1,68 @@
 #!/usr/bin/env python3
 """
-Show Watcher Results - Displays emails matched by user-defined watchers
+Show Watcher Results - Writes watcher matches to a markdown file
 Uses Supabase API (same as persister, create_watcher_bundle) - no direct Postgres needed.
 """
 
 import os
+from email.header import decode_header
 from dotenv import load_dotenv
 from supabase import create_client
 
-# Try to import tabulate, fallback to simple formatting
-try:
-    from tabulate import tabulate
-    HAS_TABULATE = True
-except ImportError:
-    HAS_TABULATE = False
-
 load_dotenv()
 
+OUTPUT_FILE = os.getenv("WATCHER_RESULTS_OUTPUT", "watcher_results.md")
 
-def _fmt_extracted(ext: dict) -> str:
-    """Format extracted_data for display. Handles amount_cents (e.g. 1999 -> $19.99)."""
+# Fields to skip (noise, redundant, or low-value)
+SKIP_KEYS = {"email", "contact_email", "applicant_name", "contact_name", "contact_method", "sender", "survey_link"}
+# Max length for values (truncate long URLs, etc.)
+MAX_VALUE_LEN = 60
+
+
+def _decode_subject(s: str) -> str:
+    """Decode MIME encoded-word subject (e.g. =?UTF-8?Q?...?=) to readable text."""
+    if not s or "=?" not in s:
+        return (s or "").strip()
+    try:
+        parts = decode_header(s)
+        decoded = []
+        for part, charset in parts:
+            if isinstance(part, bytes):
+                decoded.append(part.decode(charset or "utf-8", errors="replace"))
+            else:
+                decoded.append(part or "")
+        return " ".join(decoded).replace("\n", " ").strip()
+    except Exception:
+        return s.strip()
+
+
+def _cleaned_subject(s: str, max_len: int = 80) -> str:
+    """Decode and truncate subject."""
+    decoded = _decode_subject(s or "")
+    if len(decoded) > max_len:
+        return decoded[: max_len - 3] + "..."
+    return decoded
+
+
+def _fmt_extracted_bullets(ext: dict) -> list[str]:
+    """Return list of human-readable bullet lines. Only valuable fields, skip long URLs."""
     if not ext:
-        return "—"
-    parts = []
+        return []
+    bullets = []
     for k, v in ext.items():
-        if v is None or v == "":
+        if k in SKIP_KEYS or v is None or v == "":
             continue
-        if k == "amount_cents" and isinstance(v, (int, float)):
-            parts.append(f"amount: ${v/100:.2f}")
-        else:
-            parts.append(f"{k}: {v}")
-    s = ", ".join(parts)
-    return s[:55] + ("..." if len(s) > 55 else "")
+        if isinstance(v, list):
+            v = ", ".join(str(x) for x in v[:5])  # First 5 items
+        val = str(v)
+        if len(val) > MAX_VALUE_LEN:
+            val = val[: MAX_VALUE_LEN - 3] + "..."
+        if k == "amount_cents" and isinstance(ext[k], (int, float)):
+            val = f"${ext[k] / 100:.2f}"
+        # Human-readable key (snake_case -> Title Case)
+        label = k.replace("_", " ").title()
+        bullets.append(f"- **{label}:** {val}")
+    return bullets
 
 
 def get_supabase():
@@ -45,12 +76,7 @@ def get_supabase():
 
 
 def show_subscriptions():
-    """Show watcher results from the pipeline (all classifications by user intent)"""
-    print("\n" + "="*80)
-    print(" " * 22 + "📧 WATCHER RESULTS")
-    print("="*80)
-    print("Emails matched by your watchers (user-defined intent)\n")
-    
+    """Fetch watcher results and write to markdown file."""
     sb = get_supabase()
     if not sb:
         return
@@ -77,12 +103,10 @@ def show_subscriptions():
         if not rows:
             results = []
         else:
-            # Fetch messages for those message_ids
             msg_ids = [r["message_id"] for r in rows]
             msg_resp = sb.table("messages").select("id, received_at, subject, mailbox_id").in_("id", msg_ids).execute()
             msg_map = {m["id"]: m for m in (msg_resp.data or [])}
 
-            # Join and flatten
             results = []
             for r in rows:
                 m = msg_map.get(r["message_id"]) or {}
@@ -104,65 +128,63 @@ def show_subscriptions():
                     ext,
                 ))
 
-            # Sort by class, then by received_at desc
             results.sort(key=lambda x: (x[2] or datetime.min).isoformat() if x[2] else "", reverse=True)
             results.sort(key=lambda x: str(x[0] or ""))
 
-        if not results:
-            print("📭 No watcher matches yet.")
-            print("\nThe pipeline is processing your emails...")
-            print("Add watchers with: python scripts/create_watcher_bundle.py")
-            print("Or: python scripts/create_watcher_bundle.py")
-            print("\n💡 Check back after adding watchers and processing emails.\n")
-            return
-        
-        # Display results (group by watcher/class)
-        print(f"Found {len(results)} match(es):\n")
-        
-        if HAS_TABULATE:
-            headers = ["Watcher", "Confidence", "Date", "Subject", "Extracted", "Account"]
-            table_data = []
-            for row in results:
-                class_type, confidence, date, subject, mailbox, ext = row
-                table_data.append([
-                    class_type or "N/A",
-                    f"{confidence*100:.0f}%" if confidence else "0%",
-                    date.strftime("%Y-%m-%d") if date else "N/A",
-                    (subject[:35] + "...") if subject and len(subject) > 35 else (subject or "—"),
-                    _fmt_extracted(ext),
-                    (mailbox[:15] + "...") if mailbox and len(mailbox) > 15 else (mailbox or "N/A")
-                ])
-            print(tabulate(table_data, headers=headers, tablefmt="grid"))
-        else:
-            print(f"{'Watcher':<18} {'Conf':<8} {'Date':<12} {'Subject':<40} {'Extracted':<45} {'Account':<20}")
-            print("-" * 150)
-            for row in results:
-                class_type, confidence, date, subject, mailbox, ext = row
-                confidence_str = f"{confidence*100:.0f}%" if confidence else "0%"
-                date_str = date.strftime("%Y-%m-%d") if date else "N/A"
-                subject_str = (subject[:38] + "..") if subject and len(subject) > 38 else (subject or "—")
-                mailbox_str = (mailbox[:18] + "..") if mailbox and len(mailbox) > 18 else (mailbox or "N/A")
-                ext_str = _fmt_extracted(ext)
-                print(f"{class_type or 'N/A':<18} {confidence_str:<8} {date_str:<12} {subject_str:<40} {ext_str:<45} {mailbox_str:<20}")
-        
-        # Show pipeline stats
-        msg_resp = sb.table("messages").select("*", count="exact").limit(1).execute()
-        total_emails = getattr(msg_resp, "count", None) or len(msg_resp.data or [])
-        mailbox_resp = sb.table("messages").select("mailbox_id").execute()
-        accounts = len(set(r.get("mailbox_id") for r in (mailbox_resp.data or []) if r.get("mailbox_id")))
+        # Build markdown
+        lines = [
+            "# Watcher Results",
+            "",
+            "Emails matched by your watchers (user-defined intent).",
+            "",
+        ]
 
-        print(f"\n📊 Pipeline Statistics:")
-        print(f"   • Emails Processed: {total_emails}")
-        print(f"   • Accounts Monitored: {accounts}")
-        print(f"   • Watcher Matches: {len(results)}")
+        if not results:
+            lines.extend([
+                "No watcher matches yet.",
+                "",
+                "Add watchers with: `python scripts/create_watcher_bundle.py`",
+                "",
+            ])
+        else:
+            lines.append(f"**{len(results)}** match(es).\n")
+            for i, row in enumerate(results, 1):
+                class_type, confidence, date, subject, mailbox, ext = row
+                date_str = date.strftime("%Y-%m-%d") if date else "N/A"
+                subj = _cleaned_subject(subject or "")
+                bullets = _fmt_extracted_bullets(ext)
+                lines.append(f"### {i}. {subj}")
+                lines.append(f"*{date_str}* · {class_type or 'N/A'} ({confidence*100:.0f}%)")
+                if bullets:
+                    lines.extend(bullets)
+                lines.append("")
+
+            # Stats
+            msg_resp = sb.table("messages").select("*", count="exact").limit(1).execute()
+            total_emails = getattr(msg_resp, "count", None) or len(msg_resp.data or [])
+            mailbox_resp = sb.table("messages").select("mailbox_id").execute()
+            accounts = len(set(r.get("mailbox_id") for r in (mailbox_resp.data or []) if r.get("mailbox_id")))
+
+            lines.extend([
+                "",
+                "## Pipeline Statistics",
+                "",
+                f"- **Emails Processed:** {total_emails}",
+                f"- **Accounts Monitored:** {accounts}",
+                f"- **Watcher Matches:** {len(results)}",
+                "",
+            ])
+
+        md_content = "\n".join(lines)
+
+        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+            f.write(md_content)
+
+        print(f"✅ Wrote {len(results)} match(es) to {OUTPUT_FILE}")
 
     except Exception as e:
         print(f"❌ Error: {e}")
-    
-    print("\n" + "="*80)
-    print("💡 Add watchers: python scripts/create_watcher_bundle.py")
-    print("   Or: python scripts/run_local.sh to run the pipeline\n")
+
 
 if __name__ == "__main__":
     show_subscriptions()
-

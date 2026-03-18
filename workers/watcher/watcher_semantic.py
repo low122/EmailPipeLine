@@ -30,7 +30,6 @@ GROUP = "semantic-filter-g"
 VOYAGE_MODEL = os.getenv("VOYAGE_MODEL", "voyage-3.5-lite")
 TOP_K = 5
 EMAIL_TEXT_LIMIT = 1000
-# When true: only match emails already in email_embeddings (no Voyage calls for new emails). Use for testing with 0 cost.
 CACHE_ONLY = os.getenv("WATCHER_CACHE_ONLY", "0").strip().lower() in ("1", "true", "yes")
 
 

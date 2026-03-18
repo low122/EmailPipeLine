@@ -66,33 +66,40 @@ def connect_to_imap():
         log.error("IMAP connection failed", error=str(e))
         return None
 
-def poll_emails(mail, last_uid=0):
+# How many emails to fetch on first run (latest N)
+INITIAL_FETCH_LIMIT = int(os.getenv("IMAP_INITIAL_FETCH_LIMIT", "100"))
+# Seconds between polls for new emails
+POLL_INTERVAL = int(os.getenv("IMAP_POLL_INTERVAL", "30"))
+
+
+def poll_emails(mail, last_uid=0, limit=None):
     """
-    Poll for new emails since last_uid
+    Poll for emails since last_uid.
     
     Args:
         mail: IMAP connection
         last_uid: Last processed UID (track progress)
+        limit: If set, cap at this many (for initial fetch). None = fetch all new.
     
     Returns:
-        List of email dicts with: uid, subject, from_addr, date, raw, message_id
+        (emails, new_last_uid): List of email dicts, and the highest UID processed
     """
     try:
         status, _ = mail.select("INBOX")
         
-        # Search for new UIDs
         status, response = mail.uid('SEARCH', None, 'ALL')
-        # Response: ['100 101 102 103'] (list with one string of space-separated UIDs)
-        
-        # parse UID list; only process UIDs > last_uid (new emails)
         if status == 'OK' and response and response[0]:
             uid_string = response[0].decode('utf-8')
             all_uids = [int(uid) for uid in uid_string.split() if uid]
             sorted_uids = sorted(all_uids)
-            # Only fetch new emails (UID > last_uid) so we don't re-publish the same ones
             new_uids = [u for u in sorted_uids if u > last_uid]
-            # Cap at 20 (latest 20 new emails per poll)
-            uids = new_uids[-20:] if len(new_uids) > 20 else new_uids
+            
+            if limit and len(new_uids) > limit:
+                # Initial fetch: take the latest N
+                uids = new_uids[-limit:]
+            else:
+                uids = new_uids
+            
             log.info("Found emails", total=len(all_uids), new_since_last=len(new_uids), processing=len(uids))
         else:
             uids = []
@@ -117,12 +124,13 @@ def poll_emails(mail, last_uid=0):
                 
                 emails.append(email_dict)
         
-        log.info("Polled emails", count=len(emails), last_uid=last_uid, new_last_uid=max(uids) if uids else last_uid)
-        return emails
+        new_last_uid = max(uids) if uids else last_uid
+        log.info("Polled emails", count=len(emails), last_uid=last_uid, new_last_uid=new_last_uid)
+        return emails, new_last_uid
         
     except Exception as e:
         log.error("Error polling emails", error=str(e))
-        return []
+        return [], last_uid
 
 
 def publish_email(r: redis.Redis, email_data: dict, mailbox_id: str):
@@ -179,7 +187,7 @@ def publish_email(r: redis.Redis, email_data: dict, mailbox_id: str):
 def main():
     """
     Main service loop.
-    Phase 3: Polls IMAP and publishes real emails
+    Phase 3: Polls IMAP and publishes emails. Initial fetch: latest 100. Then polls for new emails every 30s.
     """
     log.info("imap_poller starting...")
 
@@ -189,30 +197,47 @@ def main():
         decode_responses=True
     )
 
-    # Connect to IMAP
     mail = connect_to_imap()
     if not mail:
         log.error("Failed to connect to IMAP. Exiting.")
         return
     
-    # Get mailbox_id from environment
     mailbox_id = os.getenv('EMAIL_USER', '')
     if not mailbox_id:
         log.error("EMAIL_USER not set. Exiting.")
         return
     
-    log.info("imap_poller ready", mailbox_id=mailbox_id)
+    log.info("imap_poller ready", mailbox_id=mailbox_id, initial_limit=INITIAL_FETCH_LIMIT, poll_interval=POLL_INTERVAL)
 
-    # One shot: fetch latest 20 emails, publish to pipeline, then exit. Pipeline processes only these 20.
     last_uid = 0
-    emails = poll_emails(mail, last_uid)
-    if emails:
-        log.info("Publishing 20 emails to pipeline, then exiting", count=len(emails))
-        for email_data in emails:
-            publish_email(r, email_data, mailbox_id)
-        log.info("Done. Published 20 emails. Exiting.")
-    else:
-        log.info("No emails to publish. Exiting.")
+    first_run = True
+
+    while True:
+        try:
+            # Reconnect if needed (IMAP can timeout)
+            try:
+                mail.noop()
+            except Exception:
+                log.info("Reconnecting to IMAP...")
+                mail = connect_to_imap()
+                if not mail:
+                    time.sleep(POLL_INTERVAL)
+                    continue
+
+            # Initial: latest 100. Ongoing: all new since last_uid
+            limit = INITIAL_FETCH_LIMIT if first_run else None
+            emails, last_uid = poll_emails(mail, last_uid, limit=limit)
+            first_run = False
+
+            if emails:
+                for email_data in emails:
+                    publish_email(r, email_data, mailbox_id)
+                log.info("Published emails", count=len(emails), last_uid=last_uid)
+
+            time.sleep(POLL_INTERVAL)
+        except Exception as e:
+            log.error("Poll loop error", error=str(e))
+            time.sleep(POLL_INTERVAL)
 
 
 if __name__ == "__main__":
